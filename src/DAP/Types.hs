@@ -81,6 +81,7 @@ module DAP.Types
   , TerminatedEvent                    (..)
   , ThreadEvent                        (..)
   , OutputEvent                        (..)
+  , OutputEventCategory                (..)
   , BreakpointEvent                    (..)
   , ModuleEvent                        (..)
   , LoadedSourceEvent                  (..)

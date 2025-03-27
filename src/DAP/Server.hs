@@ -95,14 +95,12 @@ serviceClient
   -> AdaptorLocal app r
   -> IO ()
 serviceClient communicate lcl = do
-  print "Waiting for request"
   let AdaptorLocal { address, handle, serverConfig } = lcl
   nextRequest <- getRequest handle address serverConfig
   let st = AdaptorState MessageTypeResponse []
   let lcl' = lcl { request = nextRequest }
   print nextRequest
   runAdaptorWith lcl' st "" (communicate (command nextRequest))
-  print "done"
 
   -- loop: serve the next request
   serviceClient communicate lcl
