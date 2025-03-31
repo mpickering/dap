@@ -13,6 +13,7 @@
 {-# LANGUAGE DeriveAnyClass             #-}
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
 ----------------------------------------------------------------------------
 module DAP.Adaptor
   ( -- * Message Construction
@@ -50,6 +51,8 @@ module DAP.Adaptor
   -- * Internal function used to execute actions on behalf of the DAP server
   -- from child threads (useful for handling asynchronous debugger events).
   , runAdaptorWith
+  , withRequest
+  , getHandle
   ) where
 ----------------------------------------------------------------------------
 import           Control.Concurrent.MVar    ( modifyMVar_, MVar )
@@ -57,7 +60,7 @@ import           Control.Concurrent.Lifted  ( fork, killThread )
 import           Control.Exception          ( throwIO )
 import           Control.Concurrent.STM     ( atomically, readTVarIO, modifyTVar' )
 import           Control.Monad              ( when, unless )
-import           Control.Monad.Except       ( runExceptT, throwError )
+import           Control.Monad.Except       ( runExceptT, throwError, mapExceptT )
 import           Control.Monad.State        ( runStateT, gets, MonadIO(liftIO), gets, modify' )
 import Control.Monad.Reader
 import           Data.Aeson                 ( FromJSON, Result (..), fromJSON )
@@ -69,52 +72,43 @@ import           System.IO                  ( Handle )
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Char8      as BS
 import qualified Data.HashMap.Strict        as H
+import qualified Data.Text as T
 import GHC.Stack
 import Data.IORef
+import qualified Data.Text.Encoding as TE
 ----------------------------------------------------------------------------
 import           DAP.Types
 import           DAP.Utils
+import           DAP.Log
 import           DAP.Internal
 ----------------------------------------------------------------------------
-logWarn :: BL8.ByteString -> Adaptor app r ()
+logWarn :: T.Text -> Adaptor app r ()
 logWarn msg = logWithAddr WARN Nothing (withBraces msg)
 ----------------------------------------------------------------------------
-logError :: BL8.ByteString -> Adaptor app r ()
+logError :: T.Text -> Adaptor app r ()
 logError msg = logWithAddr ERROR Nothing (withBraces msg)
 ----------------------------------------------------------------------------
-logInfo :: BL8.ByteString -> Adaptor app r ()
+logInfo :: T.Text -> Adaptor app r ()
 logInfo msg = logWithAddr INFO Nothing (withBraces msg)
 ----------------------------------------------------------------------------
 -- | Meant for internal consumption, used to signify a message has been
 -- SENT from the server
-debugMessage :: BL8.ByteString -> Adaptor app r ()
-debugMessage msg = do
-  shouldLog <- getDebugLogging
-  addr <- getAddress
-  liftIO
-    $ when shouldLog
-    $ logger DEBUG addr (Just SENT) msg
+debugMessage :: DebugStatus -> BL8.ByteString -> Adaptor app r ()
+debugMessage dir msg = do
+  logWithAddr DEBUG (Just dir) (TE.decodeUtf8Lenient (BL8.toStrict msg))
+
 ----------------------------------------------------------------------------
 -- | Meant for external consumption
-logWithAddr :: Level -> Maybe DebugStatus -> BL8.ByteString -> Adaptor app r ()
+logWithAddr :: Level -> Maybe DebugStatus -> T.Text -> Adaptor app r ()
 logWithAddr level status msg = do
   addr <- getAddress
-  liftIO (logger level addr status msg)
+  logAction <- getLogAction
+  liftIO (logger logAction level addr status msg)
 ----------------------------------------------------------------------------
 -- | Meant for external consumption
-logger :: Level -> SockAddr -> Maybe DebugStatus -> BL8.ByteString -> IO ()
-logger level addr maybeDebug msg = do
-  liftIO
-    $ withGlobalLock
-    $ BL8.putStrLn formatted
-  where
-    formatted
-      = BL8.concat
-      [ withBraces $ BL8.pack (show addr)
-      , withBraces $ BL8.pack (show level)
-      , maybe mempty (withBraces . BL8.pack . show) maybeDebug
-      , msg
-      ]
+logger :: LogAction IO DAPLog -> Level -> SockAddr -> Maybe DebugStatus -> T.Text -> IO ()
+logger logAction level addr maybeDebug msg =
+  logAction <& DAPLog level maybeDebug addr msg
 ----------------------------------------------------------------------------
 getDebugLogging :: Adaptor app r Bool
 getDebugLogging = asks (debugLogging . serverConfig)
@@ -124,6 +118,9 @@ getServerCapabilities = asks (serverCapabilities . serverConfig)
 ----------------------------------------------------------------------------
 getAddress :: Adaptor app r SockAddr
 getAddress = asks address
+----------------------------------------------------------------------------
+getLogAction :: Adaptor app r (LogAction IO DAPLog)
+getLogAction = asks logAction
 ----------------------------------------------------------------------------
 getHandle :: Adaptor app r Handle
 getHandle = asks handle
@@ -181,7 +178,7 @@ registerNewDebugSession k v debuggerConcurrentActions = do
       <$> sequence [fork $ action (runAdaptorWith lcl' emptyState "s") | action <- debuggerConcurrentActions]
   liftIO . atomically $ modifyTVar' store (H.insert k (debuggerThreadState, v))
   --setDebugSessionId k
-  logInfo $ BL8.pack $ "Registered new debug session: " <> unpack k
+  logInfo $ T.pack $ "Registered new debug session: " <> unpack k
   setDebugSessionId k
 
 ----------------------------------------------------------------------------
@@ -223,7 +220,7 @@ destroyDebugSession = do
   liftIO $ do
     mapM_ killThread debuggerThreads
     atomically $ modifyTVar' store (H.delete sessionId)
-  logInfo $ BL8.pack $ "SessionId " <> unpack sessionId <> " ended"
+  logInfo $ T.pack $ "SessionId " <> unpack sessionId <> " ended"
 ----------------------------------------------------------------------------
 getAppStore :: Adaptor app r (AppStore app)
 getAppStore = asks appStore
@@ -306,7 +303,7 @@ writeToHandle
   -> Adaptor app r ()
 writeToHandle _ handle evt = do
   let msg = encodeBaseProtocolMessage evt
-  debugMessage ("\n" <> encodePretty evt)
+  debugMessage SENT ("\n" <> encodePretty evt)
   withConnectionLock (BS.hPutStr handle msg)
 ----------------------------------------------------------------------------
 -- | Resets Adaptor's payload
@@ -416,14 +413,14 @@ getArguments = do
   let msg = "No args found for this message"
   case maybeArgs of
     Nothing -> do
-      logError (BL8.pack msg)
+      logError msg
       liftIO $ throwIO (ExpectedArguments msg)
     Just val ->
       case fromJSON val of
         Success r -> pure r
-        x -> do
-          logError (BL8.pack (show x))
-          liftIO $ throwIO (ParseException (show x))
+        Error reason -> do
+          logError (T.pack reason)
+          liftIO $ throwIO (ParseException reason)
 
 ----------------------------------------------------------------------------
 -- | Evaluates Adaptor action by using and updating the state in the MVar
@@ -440,3 +437,6 @@ runAdaptor lcl s (Adaptor client) =
     (Left (errorMessage, maybeMessage), s') ->
       runAdaptor lcl s' (sendErrorResponse errorMessage maybeMessage)
     (Right (), s') -> pure ()
+
+withRequest :: Request -> Adaptor app Request a -> Adaptor app r a
+withRequest r (Adaptor client) = Adaptor (mapExceptT (withReaderT (\lcl -> lcl { request = r })) client)
