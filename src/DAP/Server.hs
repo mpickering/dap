@@ -18,6 +18,7 @@
 ----------------------------------------------------------------------------
 module DAP.Server
   ( runDAPServer
+  , runDAPServerWithLogger
   , readPayload
   ) where
 ----------------------------------------------------------------------------
@@ -38,7 +39,7 @@ import           Network.Simple.TCP         ( serve, HostPreference(Host) )
 import           Network.Socket             ( socketToHandle, withSocketsDo, SockAddr )
 import           System.IO                  ( hClose, hSetNewlineMode, Handle, Newline(CRLF)
                                             , NewlineMode(NewlineMode, outputNL, inputNL)
-                                            , IOMode(ReadWriteMode) )
+                                            , IOMode(ReadWriteMode), stderr, hPrint)
 import           System.IO.Error            ( isEOFError )
 import           Text.Read                  ( readMaybe )
 import qualified Data.ByteString.Lazy.Char8 as BL8
@@ -85,7 +86,8 @@ runDAPServerWithLogger rawLogAction serverConfig@ServerConfig {..} communicate =
     handle <- socketToHandle socket ReadWriteMode
     hSetNewlineMode handle NewlineMode { inputNL = CRLF, outputNL = CRLF }
     adaptorStateMVar <- initAdaptorState logAction handle address appStore serverConfig
-    serviceClient communicate adaptorStateMVar `catch` exceptionHandler logAction handle address debugLogging
+    serviceClient communicate adaptorStateMVar
+      `catch` exceptionHandler logAction handle address debugLogging
 
 -- | Initializes the Adaptor
 --
@@ -112,7 +114,7 @@ serviceClient
   :: (Command -> Adaptor app Request ())
   -> AdaptorLocal app r
   -> IO ()
-serviceClient communicate lcl = forever $ runAdaptorWith lcl st "" $ do
+serviceClient communicate lcl = forever $ runAdaptorWith lcl st $ do
     nextRequest <- getRequest
     withRequest nextRequest (communicate (command nextRequest))
   where
@@ -135,6 +137,7 @@ exceptionHandler logAction handle address shouldLog (e :: SomeException) = do
           = logger logAction ERROR address Nothing
             $ withBraces
             $ T.pack ("Unknown Exception: " <> show e)
+  hPrint stderr ("Handling" <> show e)
   when shouldLog $ do
     dumpError
     logger logAction INFO address (Just SENT) (withBraces "Closing Connection")
@@ -165,6 +168,7 @@ getRequest = do
         Right request ->
           pure request
 
+getHeaderHandle :: Handle -> IO (Either String PayloadSize)
 getHeaderHandle handle = do
   headerBytes <- BS.hGetLine handle
   void (BS.hGetLine handle)

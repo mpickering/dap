@@ -55,13 +55,12 @@ module DAP.Adaptor
   , getHandle
   ) where
 ----------------------------------------------------------------------------
-import           Control.Concurrent.MVar    ( modifyMVar_, MVar )
 import           Control.Concurrent.Lifted  ( fork, killThread )
 import           Control.Exception          ( throwIO )
 import           Control.Concurrent.STM     ( atomically, readTVarIO, modifyTVar' )
 import           Control.Monad              ( when, unless )
 import           Control.Monad.Except       ( runExceptT, throwError, mapExceptT )
-import           Control.Monad.State        ( runStateT, gets, MonadIO(liftIO), gets, modify' )
+import           Control.Monad.State        ( runStateT, gets, gets, modify' )
 import Control.Monad.Reader
 import           Data.Aeson                 ( FromJSON, Result (..), fromJSON )
 import           Data.Aeson.Encode.Pretty   ( encodePretty )
@@ -73,7 +72,6 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Char8      as BS
 import qualified Data.HashMap.Strict        as H
 import qualified Data.Text as T
-import GHC.Stack
 import Data.IORef
 import qualified Data.Text.Encoding as TE
 ----------------------------------------------------------------------------
@@ -109,9 +107,6 @@ logWithAddr level status msg = do
 logger :: LogAction IO DAPLog -> Level -> SockAddr -> Maybe DebugStatus -> T.Text -> IO ()
 logger logAction level addr maybeDebug msg =
   logAction <& DAPLog level maybeDebug addr msg
-----------------------------------------------------------------------------
-getDebugLogging :: Adaptor app r Bool
-getDebugLogging = asks (debugLogging . serverConfig)
 ----------------------------------------------------------------------------
 getServerCapabilities :: Adaptor app r Capabilities
 getServerCapabilities = asks (serverCapabilities . serverConfig)
@@ -175,7 +170,7 @@ registerNewDebugSession k v debuggerConcurrentActions = do
   let emptyState = AdaptorState MessageTypeEvent []
   debuggerThreadState <- liftIO $
     DebuggerThreadState
-      <$> sequence [fork $ action (runAdaptorWith lcl' emptyState "s") | action <- debuggerConcurrentActions]
+      <$> sequence [fork $ action (runAdaptorWith lcl' emptyState) | action <- debuggerConcurrentActions]
   liftIO . atomically $ modifyTVar' store (H.insert k (debuggerThreadState, v))
   --setDebugSessionId k
   logInfo $ T.pack $ "Registered new debug session: " <> unpack k
@@ -282,7 +277,6 @@ sendEvent action = do
     MessageTypeResponse -> error "use send"
     MessageTypeRequest -> error "use send"
     MessageTypeEvent -> do
-      address       <- getAddress
       setField "type" messageType
 
   -- Once all fields are set, fetch the payload for sending
@@ -424,10 +418,16 @@ getArguments = do
 
 ----------------------------------------------------------------------------
 -- | Evaluates Adaptor action by using and updating the state in the MVar
-runAdaptorWith :: AdaptorLocal app r -> AdaptorState -> String -> Adaptor app r () -> IO ()
-runAdaptorWith lcl st s (Adaptor action) = do
-  runStateT (runReaderT (runExceptT action) lcl) st
-  return ()
+runAdaptorWith :: AdaptorLocal app r -> AdaptorState -> Adaptor app r () -> IO ()
+runAdaptorWith lcl st (Adaptor action) = do
+  (es,final_st) <- runStateT (runReaderT (runExceptT action) lcl) st
+  case es of
+    Left err -> error ("runAdaptorWith, unhandled exception:" <> show err)
+    Right () -> case final_st of
+      AdaptorState _ p ->
+        if null p
+          then return ()
+          else error $ "runAdaptorWith, unexpected payload:" <> show p
 
 ----------------------------------------------------------------------------
 -- | Utility for evaluating a monad transformer stack
@@ -436,7 +436,7 @@ runAdaptor lcl s (Adaptor client) =
   runStateT (runReaderT (runExceptT client) lcl) s >>= \case
     (Left (errorMessage, maybeMessage), s') ->
       runAdaptor lcl s' (sendErrorResponse errorMessage maybeMessage)
-    (Right (), s') -> pure ()
+    (Right (), _) -> pure ()
 
 withRequest :: Request -> Adaptor app Request a -> Adaptor app r a
 withRequest r (Adaptor client) = Adaptor (mapExceptT (withReaderT (\lcl -> lcl { request = r })) client)

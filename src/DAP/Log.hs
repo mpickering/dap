@@ -37,8 +37,8 @@ mkDebugMessage  = GenericMessage DEBUG
 
 renderDAPLog :: DAPLog -> Text
 renderDAPLog (GenericMessage _ t) = t
-renderDAPLog (DAPLog level maybeDebug addr msg) = T.concat
-      [ withBraces $ T.pack (show addr)
+renderDAPLog (DAPLog level maybeDebug log_addr msg) = T.concat
+      [ withBraces $ T.pack (show log_addr)
       , withBraces $ T.pack (show level)
       , maybe mempty (withBraces . T.pack . show) maybeDebug
       , msg

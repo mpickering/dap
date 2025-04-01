@@ -11,8 +11,7 @@ module DAP.Internal
   ( withLock
   ) where
 ----------------------------------------------------------------------------
-import           Control.Concurrent         ( modifyMVar_, newMVar, MVar )
-import           System.IO.Unsafe           ( unsafePerformIO )
+import           Control.Concurrent
 ----------------------------------------------------------------------------
 -- | Used for performing actions (e.g. printing debug logs to stdout)
 -- Also used for writing to each connections Handle.
