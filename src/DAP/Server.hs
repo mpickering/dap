@@ -116,7 +116,7 @@ serviceClient
   -> IO ()
 serviceClient communicate lcl = forever $ runAdaptorWith lcl st $ do
     nextRequest <- getRequest
-    withRequest nextRequest (communicate (command nextRequest))
+    withRequest nextRequest (handleRequestFailure (communicate (command nextRequest)))
   where
     st = AdaptorState MessageTypeResponse []
 
@@ -137,11 +137,11 @@ exceptionHandler logAction handle address shouldLog (e :: SomeException) = do
           = logger logAction ERROR address Nothing
             $ withBraces
             $ T.pack ("Unknown Exception: " <> show e)
-  hPrint stderr ("Handling" <> show e)
   when shouldLog $ do
     dumpError
     logger logAction INFO address (Just SENT) (withBraces "Closing Connection")
   hClose handle
+
 ----------------------------------------------------------------------------
 -- | Internal function for parsing a 'ProtocolMessage' header
 -- This function also dispatches on 'talk'

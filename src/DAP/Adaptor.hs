@@ -51,6 +51,7 @@ module DAP.Adaptor
   -- * Internal function used to execute actions on behalf of the DAP server
   -- from child threads (useful for handling asynchronous debugger events).
   , runAdaptorWith
+  , handleRequestFailure
   , withRequest
   , getHandle
   ) where
@@ -59,7 +60,7 @@ import           Control.Concurrent.Lifted  ( fork, killThread )
 import           Control.Exception          ( throwIO )
 import           Control.Concurrent.STM     ( atomically, readTVarIO, modifyTVar' )
 import           Control.Monad              ( when, unless )
-import           Control.Monad.Except       ( runExceptT, throwError, mapExceptT )
+import           Control.Monad.Except       ( runExceptT, throwError, mapExceptT, catchError )
 import           Control.Monad.State        ( runStateT, gets, gets, modify' )
 import Control.Monad.Reader
 import           Data.Aeson                 ( FromJSON, Result (..), fromJSON )
@@ -431,12 +432,10 @@ runAdaptorWith lcl st (Adaptor action) = do
 
 ----------------------------------------------------------------------------
 -- | Utility for evaluating a monad transformer stack
-runAdaptor :: AdaptorLocal app Request -> AdaptorState -> Adaptor app Request () -> IO ()
-runAdaptor lcl s (Adaptor client) =
-  runStateT (runReaderT (runExceptT client) lcl) s >>= \case
-    (Left (errorMessage, maybeMessage), s') ->
-      runAdaptor lcl s' (sendErrorResponse errorMessage maybeMessage)
-    (Right (), _) -> pure ()
+handleRequestFailure :: Adaptor app Request () -> Adaptor app Request ()
+handleRequestFailure action = do
+  action `catchError` \(errorMessage, maybeMessage) -> do
+    sendErrorResponse errorMessage maybeMessage
 
 withRequest :: Request -> Adaptor app Request a -> Adaptor app r a
 withRequest r (Adaptor client) = Adaptor (mapExceptT (withReaderT (\lcl -> lcl { request = r })) client)
